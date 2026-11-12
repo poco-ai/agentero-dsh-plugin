@@ -1,6 +1,6 @@
 {
   "name": "agentero-dsh-host",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Agentero host plugin for DeepSeek Harness",
   "homepage": "https://github.com/poco-ai/Agentero",
   "type": "module",

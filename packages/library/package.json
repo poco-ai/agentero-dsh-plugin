@@ -1,6 +1,6 @@
 {
   "name": "agentero-dsh-library",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Agentero library panel for DeepSeek Harness",
   "homepage": "https://github.com/poco-ai/Agentero",
   "type": "module",
