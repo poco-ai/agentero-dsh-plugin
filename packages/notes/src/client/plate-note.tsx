@@ -27,6 +27,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { TooltipProvider } from './tooltip'
 import { editorClassName, editorContainerClassName, editorContentClassName, editorTextStyle } from './editor-surface'
+import { joinNoteFrontmatter, splitNoteFrontmatter } from './frontmatter'
 import { noteFindPlugin, notePlugins } from './plate-kit'
 import { Toolbar, ToolbarButton } from './toolbar'
 
@@ -93,9 +94,10 @@ export function PlateNote({
   onMarkdown: (value: string) => void
   t: NotesT
 }): ReactNode {
+  const frontmatter = splitNoteFrontmatter(markdown)
   const editor = usePlateEditor({
     plugins: notePlugins,
-    value: (next) => slateValue(next, markdown),
+    value: (next) => slateValue(next, frontmatter.body),
   }, [])
   const baseline = useRef<string | null>(null)
   const [findOpen, setFindOpen] = useState(false)
@@ -112,10 +114,11 @@ export function PlateNote({
         const next = markdownOf(editor)
         if (next === baseline.current) return
         baseline.current = next
-        onMarkdown(next)
+        onMarkdown(joinNoteFrontmatter(frontmatter.raw, next))
       }}
     >
       <NoteSurface
+        aliases={frontmatter.aliases}
         findOpen={findOpen}
         placeholder={placeholder}
         trailing={trailing}
@@ -128,6 +131,7 @@ export function PlateNote({
 }
 
 function NoteSurface({
+  aliases,
   findOpen,
   placeholder,
   trailing,
@@ -135,6 +139,7 @@ function NoteSurface({
   t,
   onFind,
 }: {
+  aliases: readonly string[]
   findOpen: boolean
   placeholder?: string
   trailing?: ReactNode
@@ -145,6 +150,7 @@ function NoteSurface({
   return (
     <div className="@container/editor relative flex min-h-0 flex-1 flex-col" style={editorTextStyle}>
       <NoteFormatBar trailing={trailing} t={t} onFind={() => { onFind(true) }} />
+      <NoteAliases aliases={aliases} label={t('aliases')} />
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {findOpen ? <FindBar t={t} onClose={() => { onFind(false) }} /> : null}
@@ -162,6 +168,20 @@ function NoteSurface({
         </div>
         {aside}
       </div>
+    </div>
+  )
+}
+
+function NoteAliases({ aliases, label }: { aliases: readonly string[], label: string }): ReactNode {
+  if (aliases.length === 0) return null
+  return (
+    <div className="shrink-0 border-b border-border px-4 py-2">
+      <p className="m-0 text-xs text-muted-foreground">{label}</p>
+      <ul className="m-0 mt-1 flex list-none flex-col gap-0.5 p-0">
+        {aliases.map((alias, index) => (
+          <li key={`${index}:${alias}`} className="text-sm leading-snug">{alias}</li>
+        ))}
+      </ul>
     </div>
   )
 }
