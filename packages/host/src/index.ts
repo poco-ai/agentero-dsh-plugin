@@ -14,7 +14,7 @@ import {
   changeTag, deletePaper, discoverArxiv, downloadPaper, exportBib, importBib, importId, setRead,
 } from './catalog.js'
 import { listVaultNotes, locateVaultPath, readVaultFile, within, writeVaultNote } from './notes-files.js'
-import { type MarkRect, readMarks, writeMark } from './marks-store.js'
+import { deleteMark, type MarkRect, readMarks, writeMark } from './marks-store.js'
 import { bookmarkNodesFrom, writePdfBookmarks } from './bookmarks-write.js'
 import { locateVaultPdf, readVaultPdf } from './pdf-file.js'
 import { registerTools } from './tools.js'
@@ -634,9 +634,9 @@ async function handleMarks(
   children: Set<ChildProcess>,
   translate: TranslateText,
 ): Promise<void> {
-  if (req.method !== 'GET' && req.method !== 'POST') {
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'DELETE') {
     res.statusCode = 405
-    res.setHeader('allow', 'GET, POST')
+    res.setHeader('allow', 'GET, POST, DELETE')
     res.end()
     return
   }
@@ -653,6 +653,37 @@ async function handleMarks(
       return
     }
     sendJson(res, 200, { paperPath: result.paperPath, marks: result.marks })
+    return
+  }
+  if (req.method === 'DELETE') {
+    const raw = await readTextBody(req)
+    if (raw === undefined) {
+      sendJson(res, 400, { error: 'invalid body' })
+      req.destroy()
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      sendJson(res, 400, { error: 'invalid body' })
+      return
+    }
+    const record = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined
+    const ref = typeof record?.ref === 'string' ? record.ref.trim() : ''
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    if (ref === '' || id === '') {
+      sendJson(res, 400, { error: 'invalid body' })
+      return
+    }
+    const removed = await deleteMark(settings.vault, ref, id)
+    if (!removed.ok) {
+      sendJson(res, removed.status, { error: removed.error })
+      return
+    }
+    sendJson(res, 200, { ok: true, ids: removed.ids, path: removed.path })
     return
   }
   const raw = await readTextBody(req)

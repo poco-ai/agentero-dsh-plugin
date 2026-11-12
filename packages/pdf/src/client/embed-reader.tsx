@@ -311,6 +311,11 @@ function ReaderChrome(props: ReaderChromeProps): ReactNode {
       <PdfToolbar
         notesOpen={props.notesOpen}
         onToggleNotes={props.onToggleNotes}
+        comments={props.marks.flatMap(mark => (
+          mark.kind === 'highlight' && mark.note.trim() !== ''
+            ? [{ id: mark.id, page: mark.page, note: mark.note }]
+            : []
+        ))}
         translating={translateOpen && translation.running}
         translateOpen={translateOpen}
         onToggleTranslate={() => {

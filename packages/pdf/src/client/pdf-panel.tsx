@@ -5,6 +5,7 @@ import { EmbedReader, type SelectionHit } from './embed-reader'
 import type { EditableBookmark } from './bookmark'
 import { type PdfPaperTone } from './page-theme'
 import { DEFAULT_HIGHLIGHT_COLOR, type HighlightColor } from './palette'
+import { overlappingHighlightId } from './mark-overlap'
 import { PDF_FLOAT_CARD } from './pdf-chrome-surface'
 import { lastSegment, parsePaperAddress, resourceName, notesPaperPath } from './resource-path'
 import { SelectionMenu } from './selection-menu'
@@ -59,6 +60,7 @@ export interface PdfInjected {
   loadPdf: (ref: string) => Promise<ArrayBuffer>
   loadMarks: (ref: string) => Promise<PaintMark[]>
   addMark: (body: MarkAdd) => Promise<string | undefined>
+  removeMark: (ref: string, id: string) => Promise<void>
   /** Vault-relative ref for a file-resource address, or an empty string outside the vault. */
   resolveAddress: (address: string) => string
   /** Send a question and citation as a new conversation turn. */
@@ -110,7 +112,7 @@ export function PdfTitle({ useTabInfo, t }: PropsRuntime<'sidebar.right.pane.tab
 }
 
 export function PdfPanel(props: PdfPanelProps): ReactNode {
-  const { t, sessionId, useTabInfo, loadPdf, loadMarks, addMark, ask, saveBookmarks, translate, loadLayout, resolveAddress } = props
+  const { t, sessionId, useTabInfo, loadPdf, loadMarks, addMark, removeMark, ask, saveBookmarks, translate, loadLayout, resolveAddress } = props
   const navigation = useTabInfo().tab.navigation
   const paperPath = parsePaperAddress(navigation.address) ?? resolveAddress(navigation.address)
   const notesPath = notesPaperPath(paperPath)
@@ -242,6 +244,7 @@ export function PdfPanel(props: PdfPanelProps): ReactNode {
       }).finally(() => { setBusy(false) })
       return
     }
+    if (draft.trim() === '') return
     runMark({
       ref: paperPath,
       kind: 'highlight',
@@ -299,6 +302,14 @@ export function PdfPanel(props: PdfPanelProps): ReactNode {
     })
   }
 
+  const clearHighlightId = menu === undefined
+    ? undefined
+    : overlappingHighlightId(
+      marks,
+      menu.page,
+      menu.rects.map(rect => ({ x: rect.origin.x, y: rect.origin.y, w: rect.size.width, h: rect.size.height })),
+    )
+
   const selectionMenu = menu === undefined ? null : (
     <SelectionMenu
       screen={{ x: menu.screenX, y: menu.screenY }}
@@ -325,6 +336,18 @@ export function PdfPanel(props: PdfPanelProps): ReactNode {
           pageSize: menu.pageSize,
           color,
         })
+      }}
+      onClearHighlight={clearHighlightId === undefined ? undefined : () => {
+        const id = clearHighlightId
+        setBusy(true)
+        setMenu(undefined)
+        void removeMark(paperPath, id).then(() => {
+          setSelectionClearVersion(version => version + 1)
+          refreshMarks()
+        }).catch((error: unknown) => {
+          const text = error instanceof Error ? error.message : ''
+          setBanner(text === '' ? t('markFailed') : text)
+        }).finally(() => { setBusy(false) })
       }}
       onComment={() => { setMenu({ ...menu, mode: 'comment' }) }}
       onTranslate={() => { openTranslate(menu) }}

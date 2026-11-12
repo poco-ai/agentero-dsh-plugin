@@ -9,7 +9,7 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 import { locateVaultPath, within } from './notes-files.js'
 
@@ -195,7 +195,7 @@ function fromAnnotation(value: unknown): MarkItem | undefined {
     page: pageIndex + 1,
     space: 'pt',
     rects,
-    note: textOr(annotation.contents) || textOr(custom?.quote),
+    note: textOr(annotation.contents),
     ...(palette !== '' && palette in PALETTE ? { color: palette } : {}),
   }
 }
@@ -305,6 +305,74 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
+/** Share of the smaller region that must intersect before two highlights are the same selection. */
+const HIGHLIGHT_OVERLAP = 0.6
+
+function rectArea(rect: MarkRect): number {
+  return rect.w * rect.h
+}
+
+function intersectionArea(left: MarkRect, right: MarkRect): number {
+  const width = Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x)
+  const height = Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y)
+  if (width <= 0 || height <= 0) return 0
+  return width * height
+}
+
+function overlapRatio(left: readonly MarkRect[], right: readonly MarkRect[]): number {
+  const leftArea = left.reduce((sum, rect) => sum + rectArea(rect), 0)
+  const rightArea = right.reduce((sum, rect) => sum + rectArea(rect), 0)
+  const smaller = Math.min(leftArea, rightArea)
+  if (!(smaller > 0)) return 0
+  let shared = 0
+  for (const a of left) {
+    for (const b of right) shared += intersectionArea(a, b)
+  }
+  return shared / smaller
+}
+
+function annotationRecord(item: unknown): Record<string, unknown> | undefined {
+  const record = recordOf(item)
+  if (record === undefined) return undefined
+  return recordOf(record.annotation) ?? record
+}
+
+function annotationRects(annotation: Record<string, unknown>): MarkRect[] {
+  const rects: MarkRect[] = []
+  const segments = Array.isArray(annotation.segmentRects) ? annotation.segmentRects : []
+  for (const segment of segments) {
+    const rect = rectOf(segment)
+    if (rect !== undefined) rects.push(rect)
+  }
+  if (rects.length === 0) {
+    const single = rectOf(annotation.rect)
+    if (single !== undefined) rects.push(single)
+  }
+  return rects
+}
+
+interface HighlightMatch {
+  index: number
+  annotation: Record<string, unknown>
+}
+
+/** The same-page highlight that already covers this selection, if one does. */
+function matchingHighlight(items: readonly unknown[], page: number, rects: readonly MarkRect[]): HighlightMatch | undefined {
+  let best: (HighlightMatch & { ratio: number }) | undefined
+  for (let index = 0; index < items.length; index += 1) {
+    const annotation = annotationRecord(items[index])
+    if (annotation === undefined) continue
+    const subtype = numberOr(annotation.type)
+    if (subtype !== undefined && subtype !== HIGHLIGHT_SUBTYPE) continue
+    const pageIndex = numberOr(annotation.pageIndex)
+    if (pageIndex === undefined || pageIndex + 1 !== page) continue
+    const ratio = overlapRatio(rects, annotationRects(annotation))
+    if (ratio < HIGHLIGHT_OVERLAP) continue
+    if (best === undefined || ratio > best.ratio) best = { index, annotation, ratio }
+  }
+  return best === undefined ? undefined : { index: best.index, annotation: best.annotation }
+}
+
 /** 2-space JSON with a trailing newline, replaced atomically (same as Rust). */
 async function writeAnnotations(dir: string, items: unknown[]): Promise<void> {
   await mkdir(dir, { recursive: true })
@@ -329,8 +397,29 @@ export async function writeMark(vault: string, body: MarkWrite): Promise<MarksWr
   const now = nowIso()
 
   if (body.kind === 'highlight') {
-    const id = randomUUID()
     const color = body.color !== undefined && body.color in PALETTE ? body.color : 'yellow'
+    const comment = body.comment?.trim() ?? ''
+    const existing = await readAnnotations(dir)
+    const match = matchingHighlight(existing, body.page, body.rects)
+    const storedPath = `${paper.dir.relative}/marks/${ANNOTATIONS_FILE}`
+    if (match !== undefined) {
+      const current = textOr(recordOf(match.annotation.custom)?.paletteKey) || 'yellow'
+      const id = textOr(match.annotation.id)
+      if (comment === '' && current === color) {
+        existing.splice(match.index, 1)
+        await writeAnnotations(dir, existing)
+        return { ok: true, ids: id === '' ? [] : [id], path: storedPath }
+      }
+      match.annotation.strokeColor = PALETTE[color]
+      match.annotation.opacity = HIGHLIGHT_OPACITY
+      const custom = recordOf(match.annotation.custom) ?? { app: 'agentero', quote }
+      custom.paletteKey = color
+      match.annotation.custom = custom
+      if (comment !== '') match.annotation.contents = comment
+      await writeAnnotations(dir, existing)
+      return { ok: true, ids: id === '' ? [] : [id], path: storedPath }
+    }
+    const id = randomUUID()
     const annotation: Record<string, unknown> = {
       type: HIGHLIGHT_SUBTYPE,
       id,
@@ -342,11 +431,9 @@ export async function writeMark(vault: string, body: MarkWrite): Promise<MarksWr
       created: now,
       custom: { app: 'agentero', paletteKey: color, quote },
     }
-    const comment = body.comment?.trim() ?? ''
     if (comment !== '') annotation.contents = comment
-    const existing = await readAnnotations(dir)
     await writeAnnotations(dir, [...existing, { annotation }])
-    return { ok: true, ids: [id], path: `${paper.dir.relative}/marks/${ANNOTATIONS_FILE}` }
+    return { ok: true, ids: [id], path: storedPath }
   }
 
   const width = body.pageSize.width
@@ -446,4 +533,27 @@ export async function writeMark(vault: string, body: MarkWrite): Promise<MarksWr
   await mkdir(dir, { recursive: true })
   await writeFile(path.join(dir, `${id}.json`), `${JSON.stringify(mark, null, 2)}\n`, 'utf8')
   return { ok: true, ids: [id], path: `${paper.dir.relative}/marks/${id}.json` }
+}
+
+const MARK_ID = /^[A-Za-z0-9_-]{1,80}$/
+
+/** Remove one highlight from `annotations.json`, or one per-id mark file. */
+export async function deleteMark(vault: string, ref: string, id: string): Promise<MarksWriteResult> {
+  if (!MARK_ID.test(id)) return { ok: false, status: 400, error: 'invalid body' }
+  const paper = await paperDir(vault, ref)
+  if (!paper.ok) return paper
+  const dir = path.join(paper.dir.real, 'marks')
+  const existing = await readAnnotations(dir)
+  const next = existing.filter(item => textOr(annotationRecord(item)?.id) !== id)
+  let removed = next.length !== existing.length
+  if (removed) await writeAnnotations(dir, next)
+  try {
+    await rm(path.join(dir, `${id}.json`))
+    removed = true
+  } catch (error) {
+    const code = ioCode(error)
+    if (code !== 'ENOENT') throw error
+  }
+  if (!removed) return { ok: false, status: 404, error: 'not found' }
+  return { ok: true, ids: [id], path: `${paper.dir.relative}/marks/${ANNOTATIONS_FILE}` }
 }

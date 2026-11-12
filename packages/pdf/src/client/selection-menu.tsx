@@ -1,4 +1,4 @@
-import { Check, Copy, Languages, MessageSquare } from "lucide-react";
+import { Check, Copy, Eraser, Languages, MessageSquare } from "lucide-react";
 import {
 	useCallback,
 	useEffect,
@@ -34,6 +34,8 @@ type SelectionMenuProps = {
 	onCopy: () => Promise<boolean>;
 	/** Every swatch calls this with the chosen palette key. */
 	onHighlight: (color: HighlightColor) => void;
+	/** Present when the selection already covers a saved highlight. */
+	onClearHighlight?: () => void;
 	onComment: () => void;
 	onTranslate: () => void;
 	onAsk: () => void;
@@ -123,6 +125,7 @@ export function SelectionMenu({
 	t,
 	onCopy,
 	onHighlight,
+	onClearHighlight,
 	onComment,
 	onTranslate,
 	onAsk,
@@ -226,6 +229,24 @@ export function SelectionMenu({
 							if (!busy) onHighlight(color);
 						}}
 					/>
+					{onClearHighlight === undefined ? null : (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									className="size-7"
+									aria-label={t("clearHighlight")}
+									disabled={busy}
+									onClick={onClearHighlight}
+								>
+									<Eraser className="size-3.5" />
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="top">{t("clearHighlight")}</TooltipContent>
+						</Tooltip>
+					)}
 					<div ref={dividerRef} className="mx-0.5 h-4 w-px shrink-0 bg-border" />
 					<Tooltip>
 						<TooltipTrigger asChild>
@@ -295,7 +316,7 @@ export function SelectionMenu({
 					<button
 						type="button"
 						className={TEXT_ACTION}
-						disabled={busy || (mode === "ask" && draft.trim() === "")}
+						disabled={busy || draft.trim() === ""}
 						onClick={onSubmitDraft}
 					>
 						{mode === "ask" ? t("send") : t("save")}
