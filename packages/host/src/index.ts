@@ -7,6 +7,7 @@ import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { cliStatus, installManagedCli } from './cli-install.js'
 import { cliFailure, runAgentero } from './cli-run.js'
@@ -19,14 +20,13 @@ import { bookmarkNodesFrom, writePdfBookmarks } from './bookmarks-write.js'
 import { locateVaultPdf, readVaultPdf } from './pdf-file.js'
 import { registerTools } from './tools.js'
 import { createTranslator, translationTarget, type TranslateText, type TranslationLlm, type DefaultTranslationModel } from './translate.js'
-import { isAllowedApiHost } from './api-host.js'
 import { selectVault, vaultInfo, vaultScope } from './vault.js'
 
 /** Cordis plugin name. The loader row id matches this name. */
 export const name = 'agentero-host'
 
 /** HTTP routes are registered on the composition web server. `agents` cites into a session. `tools` exposes the vault to the model. */
-export const inject = ['webServer', 'agents', 'tools', 'settings']
+export const inject = ['webServer', 'connection', 'agents', 'tools', 'settings']
 
 /**
  * Optional host settings. Omitted fields use the defaults below. The three
@@ -1155,10 +1155,11 @@ async function handleApi(
   translate: TranslateText,
   persistBin: (bin: string) => Promise<void>,
   cliState: CliInstallState,
-  bindHost: string | undefined,
+  connection: HostConnectionHandle,
 ): Promise<void> {
-  if (!isAllowedApiHost(req.headers.host, bindHost)) {
-    sendJson(res, 403, { error: 'Agentero API is not available for this host. Open dsh on loopback or on the address it is bound to.' })
+  const rejection = connection.requestRejection(req)
+  if (rejection !== undefined) {
+    sendJson(res, rejection, { error: rejection === 401 ? 'unauthorized' : 'forbidden' })
     return
   }
   const pathname = pathnameOf(req)
@@ -1336,7 +1337,7 @@ export function apply(ctx: Context, config?: Config): void {
     const route: WebRoute = {
       kind: 'prefix',
       path: API_PREFIX,
-      handler: (req, res) => handleApi(settings, agents, req, res, children, vaultHost, translate, persistBin, cliState, ctx.webServer.host).catch((error: unknown) => {
+      handler: (req, res) => handleApi(settings, agents, req, res, children, vaultHost, translate, persistBin, cliState, ctx.connection).catch((error: unknown) => {
         if (res.headersSent) return
         const message = error instanceof Error ? error.message : String(error)
         sendJson(res, 502, { error: message })
