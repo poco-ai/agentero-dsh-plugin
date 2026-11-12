@@ -1,8 +1,13 @@
-/** One-shot PDF translation through the Harness model registry. No session or tools are used. */
+/** One-shot PDF translation through the Harness model registry. No chat session or tools are used. */
+
+import { randomUUID } from 'node:crypto'
 
 import { retryTranslation } from './translation/retry.js'
 import { buildTranslateMessages } from './translation/prompt.js'
 import { translateDocumentText } from './translation/pipeline.js'
+
+/** Stable per-process identity; relays use it for routing and prompt-cache affinity. */
+const SESSION_ID = randomUUID()
 
 export interface TranslationSettings {
   translationProvider: string
@@ -22,6 +27,11 @@ interface CallConfig extends CallControls {
   model: string
 }
 
+/** Routing identity forwarded as transport metadata; some providers reject calls without one. */
+interface CallIdentity {
+  sessionId?: string
+}
+
 /** Minimal public dsh-llm seam, like the host's other injected service faces. */
 export interface TranslationLlm {
   prepareCall(
@@ -32,7 +42,7 @@ export interface TranslationLlm {
     }) => CallControls,
   ): Promise<{
     config: CallConfig
-    stream(options: CallConfig & {
+    stream(options: CallConfig & CallIdentity & {
       system: string
       messages: { role: 'user', content: { type: 'text', text: string }[] }[]
       signal: AbortSignal
@@ -102,6 +112,7 @@ export function createTranslator(
         system: messages.system,
         messages: [{ role: 'user', content: [{ type: 'text', text: messages.user }] }],
         signal,
+        sessionId: SESSION_ID,
       })) {
         signal.throwIfAborted()
         // block-end is authoritative; accumulating deltas as well would duplicate text.
