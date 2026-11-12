@@ -146,10 +146,23 @@ export function resourceName(address: string): string | undefined {
   return name === '' ? undefined : name
 }
 
-/** Match the paper directory accepted by the notes write API. */
+const PDF_FILE_NAME = /\.[pP][dD][fF]$/
+
+/**
+ * Paper directory accepted by the notes write API.
+ *
+ * Vaults group papers as `papers/<group>/<paper>` as well as `papers/<paper>`.
+ * A ref may name that directory or a PDF inside it. `papers` itself and a PDF
+ * sitting directly in `papers/` are not paper directories. `.` and `..` segments
+ * are rejected.
+ */
 export function notesPaperPath(ref: string): string | undefined {
   const normalized = ref.replaceAll('\\', '/').replace(/\/+$/, '')
-  const match = /^(papers\/[^/]+)(?:\/[^/]+\.[pP][dD][fF])?$/.exec(normalized)
-  if (match === null || match[1] === 'papers/.' || match[1] === 'papers/..') return undefined
-  return match[1]
+  const segments = normalized.split('/')
+  if (segments.length < 2 || segments[0] !== 'papers') return undefined
+  if (segments.some(segment => segment === '' || segment === '.' || segment === '..')) return undefined
+  const last = segments[segments.length - 1] ?? ''
+  const directory = PDF_FILE_NAME.test(last) ? segments.slice(0, -1) : segments
+  if (directory.length < 2) return undefined
+  return directory.join('/')
 }

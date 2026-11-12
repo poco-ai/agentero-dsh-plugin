@@ -240,9 +240,14 @@ function notesFile(relative: string): boolean {
   return relative.startsWith('notes/') && relative.length > 'notes/'.length
 }
 
-/** `papers/<id>/NOTES.md` only. The paper directory must already exist. */
+/**
+ * `papers/<...>/NOTES.md` at any depth. The paper directory must already exist.
+ * `papers/NOTES.md` is not a paper note.
+ */
 function paperNotesFile(relative: string): boolean {
-  return /^papers\/[^/]+\/NOTES\.md$/.test(relative)
+  const segments = relative.split('/')
+  if (segments.length < 3 || segments[0] !== 'papers' || segments[segments.length - 1] !== 'NOTES.md') return false
+  return segments.slice(1, -1).every(segment => segment !== '' && segment !== '.' && segment !== '..')
 }
 
 export interface VaultLocation {
@@ -269,7 +274,7 @@ export async function locateVaultPath(vault: string, rawPath: string): Promise<
 }
 
 /**
- * Create or replace `papers/<id>/NOTES.md`.
+ * Create or replace `papers/<...>/NOTES.md`.
  * The paper directory must already exist. This does not create `papers/`.
  */
 async function writePaperNotes(vault: string, relative: string, text: string): Promise<NoteWriteResult> {

@@ -50,7 +50,11 @@ test('maps paper directories and direct PDF files to writable notes directories'
   assert.equal(notesPaperPath('papers/2026.acl-long.27'), 'papers/2026.acl-long.27')
   assert.equal(notesPaperPath('papers/中文/paper.PDF'), 'papers/中文')
   assert.equal(notesPaperPath('papers/p/'), 'papers/p')
-  for (const ref of ['notes/file.pdf', 'papers/../file.pdf', 'papers/./file.pdf', 'papers/group/p/paper.pdf', '', '/tmp/paper.pdf']) {
+  assert.equal(notesPaperPath('papers/3d-vision/三维重建-v1.0'), 'papers/3d-vision/三维重建-v1.0')
+  assert.equal(notesPaperPath('papers/3d-vision/三维重建-v1.0/'), 'papers/3d-vision/三维重建-v1.0')
+  assert.equal(notesPaperPath('papers/group/p/paper.pdf'), 'papers/group/p')
+  assert.equal(notesPaperPath('papers\\group\\p\\paper.PDF'), 'papers/group/p')
+  for (const ref of ['notes/file.pdf', 'papers/../file.pdf', 'papers/./file.pdf', 'papers/file.pdf', 'papers', 'papers/group/../p', '', '/tmp/paper.pdf']) {
     assert.equal(notesPaperPath(ref), undefined, ref)
   }
 })
