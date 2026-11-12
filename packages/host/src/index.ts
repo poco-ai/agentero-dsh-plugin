@@ -19,6 +19,7 @@ import { bookmarkNodesFrom, writePdfBookmarks } from './bookmarks-write.js'
 import { locateVaultPdf, readVaultPdf } from './pdf-file.js'
 import { registerTools } from './tools.js'
 import { createTranslator, translationTarget, type TranslateText, type TranslationLlm, type DefaultTranslationModel } from './translate.js'
+import { isAllowedApiHost } from './api-host.js'
 import { selectVault, vaultInfo, vaultScope } from './vault.js'
 
 /** Cordis plugin name. The loader row id matches this name. */
@@ -199,29 +200,6 @@ function cliPayload(
   state: CliInstallState,
 ): Awaited<ReturnType<typeof cliStatus>> & { installing: boolean, installError: string | null } {
   return { ...status, installing: state.running, installError: state.error }
-}
-
-/** Host header name without the port. Bracketed IPv6 keeps the address inside the brackets. */
-function hostName(header: string | undefined): string | undefined {
-  if (header === undefined) return undefined
-  const value = header.trim().toLowerCase()
-  if (value === '') return undefined
-  if (value.startsWith('[')) {
-    const end = value.indexOf(']')
-    if (end < 2) return undefined
-    return value.slice(1, end)
-  }
-  if (value === '::1') return value
-  const colon = value.lastIndexOf(':')
-  if (colon === -1) return value
-  if (value.indexOf(':') !== colon) return undefined
-  return value.slice(0, colon)
-}
-
-/** True when the request Host names this machine's loopback. */
-function isLoopbackHost(header: string | undefined): boolean {
-  const name = hostName(header)
-  return name === '127.0.0.1' || name === 'localhost' || name === '::1'
 }
 
 function pathnameOf(req: IncomingMessage): string | undefined {
@@ -1146,10 +1124,10 @@ async function handleApi(
   translate: TranslateText,
   persistBin: (bin: string) => Promise<void>,
   cliState: CliInstallState,
+  bindHost: string | undefined,
 ): Promise<void> {
-  if (!isLoopbackHost(req.headers.host)) {
-    res.statusCode = 403
-    res.end()
+  if (!isAllowedApiHost(req.headers.host, bindHost)) {
+    sendJson(res, 403, { error: 'Agentero API is not available for this host. Open dsh on loopback or on the address it is bound to.' })
     return
   }
   const pathname = pathnameOf(req)
@@ -1327,7 +1305,7 @@ export function apply(ctx: Context, config?: Config): void {
     const route: WebRoute = {
       kind: 'prefix',
       path: API_PREFIX,
-      handler: (req, res) => handleApi(settings, agents, req, res, children, vaultHost, translate, persistBin, cliState).catch((error: unknown) => {
+      handler: (req, res) => handleApi(settings, agents, req, res, children, vaultHost, translate, persistBin, cliState, ctx.webServer.host).catch((error: unknown) => {
         if (res.headersSent) return
         const message = error instanceof Error ? error.message : String(error)
         sendJson(res, 502, { error: message })
