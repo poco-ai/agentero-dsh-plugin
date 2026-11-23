@@ -17,11 +17,14 @@ export interface SettingsVault {
 /** Local CLI state reported by the Host; mirrors `cliStatus` on the Node side. */
 export interface SettingsCliStatus {
   available: boolean
+  /** False when the CLI predates the commands this plugin calls. */
+  supported: boolean
+  minimumVersion: string
   version: string | null
   bin: string | null
   source: 'configured' | 'managed' | null
   configured: string
-  managedPath: string
+  managedPath: string | null
   managedInstalled: boolean
   shimPath: string
   shimInstalled: boolean
@@ -55,7 +58,8 @@ export type SettingsLocaleKey =
   | 'nav' | 'vaultTitle' | 'vaultPlaceholder' | 'choose' | 'apply' | 'applying' | 'invalidVault'
   | 'createVault' | 'creating' | 'createFailed'
   | 'cliTitle' | 'cliPlaceholder' | 'save' | 'saving' | 'saved' | 'saveFailed' | 'reset'
-  | 'cliChecking' | 'cliReady' | 'cliMissing' | 'cliStatusFailed' | 'install' | 'installing' | 'installFailed'
+  | 'cliChecking' | 'cliReady' | 'cliMissing' | 'cliOutdated' | 'cliOutdatedHint' | 'cliUpdate' | 'cliStatusFailed'
+  | 'install' | 'installing' | 'installFailed'
   | 'promoTitle' | 'promoDescription' | 'promoGithub'
   | 'loadFailed' | 'unavailable'
 
@@ -81,6 +85,9 @@ export const en: Record<SettingsLocaleKey, string> = {
   cliChecking: 'Checking…',
   cliReady: 'Ready',
   cliMissing: 'Not found',
+  cliOutdated: 'Too old',
+  cliOutdatedHint: 'This plugin needs Agentero CLI {version} or newer. Update it to list, import, and organize papers.',
+  cliUpdate: 'Update',
   cliStatusFailed: 'Could not read the CLI status.',
   install: 'Install',
   installing: 'Installing…',
@@ -114,6 +121,9 @@ export const zh: Record<SettingsLocaleKey, string> = {
   cliChecking: '检查中…',
   cliReady: '可用',
   cliMissing: '未找到',
+  cliOutdated: '版本过旧',
+  cliOutdatedHint: '本插件需要 Agentero CLI {version} 或更高版本，请更新后再使用知识库功能。',
+  cliUpdate: '更新',
   cliStatusFailed: '无法读取 CLI 状态。',
   install: '安装',
   installing: '安装中…',
@@ -133,6 +143,36 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== '' ? error.message : fallback
+}
+
+/** One-line CLI verdict: installing, ready, too old, missing, or still unknown. */
+function CliStatusBadge({ status, loading, t }: {
+  status: SettingsCliStatus | null
+  loading: boolean
+  t: PropsLocale<'agentero.settings'>['t']
+}) {
+  if (status?.installing === true) {
+    return <span className="flex items-center gap-1 text-xs text-muted-foreground">
+      <LoaderCircle className="size-3 animate-spin" aria-hidden />{t('installing')}
+    </span>
+  }
+  if (status === null) {
+    return <span className="text-xs text-muted-foreground">{loading ? t('cliChecking') : t('cliStatusFailed')}</span>
+  }
+  const version = status.version === null ? '' : ` · v${status.version}`
+  if (!status.available) {
+    return <span className="flex items-center gap-1 text-xs text-muted-foreground">
+      <AlertCircle className="size-3" aria-hidden />{t('cliMissing')}
+    </span>
+  }
+  if (!status.supported) {
+    return <span className="flex items-center gap-1 text-xs text-destructive" title={status.bin ?? undefined}>
+      <AlertCircle className="size-3" aria-hidden />{t('cliOutdated')}{version}
+    </span>
+  }
+  return <span className="flex items-center gap-1 text-xs text-muted-foreground" title={status.bin ?? undefined}>
+    <Check className="size-3" aria-hidden />{t('cliReady')}{version}
+  </span>
 }
 
 // The plugin owner supplies a generic form; both entry points use our shared model instead.
@@ -222,6 +262,8 @@ export function AgenteroSettings(props: AgenteroSettingsProps) {
   const busy = picking || applying || creating
   const installingCli = installing || cli?.installing === true
   const cliFailure = cliError !== '' ? cliError : cli?.installError ?? ''
+  /** A missing CLI and one too old for this plugin are both fixed by an install. */
+  const cliUnusable = cli === null || !cli.available || !cli.supported
   const draft = vaultDraft.trim()
   const vaultReady = draft !== '' && draft !== vault && !busy
   const disabled = !state.writable || state.saving
@@ -313,31 +355,22 @@ export function AgenteroSettings(props: AgenteroSettingsProps) {
       <div className="flex items-center justify-between gap-2">
         <h3 className="m-0 text-[0.875rem] font-normal">{t('cliTitle')}</h3>
         <div className="flex items-center gap-2">
-          {cli?.installing === true
-            ? <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <LoaderCircle className="size-3 animate-spin" aria-hidden />{t('installing')}
-            </span>
-            : cli === null
-              ? <span className="text-xs text-muted-foreground">{cliLoading ? t('cliChecking') : t('cliStatusFailed')}</span>
-              : cli.available
-                ? <span className="flex items-center gap-1 text-xs text-muted-foreground" title={cli.bin ?? undefined}>
-                  <Check className="size-3" aria-hidden />{t('cliReady')}{cli.version === null ? '' : ` · v${cli.version}`}
-                </span>
-                : <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <AlertCircle className="size-3" aria-hidden />{t('cliMissing')}
-                </span>}
-          {state.available && cli?.available !== true
+          <CliStatusBadge status={cli} loading={cliLoading} t={t} />
+          {state.available && cliUnusable
             ? <Button
               type="button"
               size="sm"
               disabled={installingCli || (cli !== null && !cli.canInstall)}
               onClick={() => { void installCli() }}
             >
-              <Download aria-hidden />{installingCli ? t('installing') : t('install')}
+              <Download aria-hidden />{installingCli ? t('installing') : cli?.supported === false ? t('cliUpdate') : t('install')}
             </Button>
             : null}
         </div>
       </div>
+      {cli?.available === true && !cli.supported
+        ? <p role="status" className="text-xs text-muted-foreground">{t('cliOutdatedHint', { version: cli.minimumVersion })}</p>
+        : null}
       {!state.available
         ? <p role="status" className="text-xs text-muted-foreground">{t('unavailable')}</p>
         : <div className="flex items-center gap-2">

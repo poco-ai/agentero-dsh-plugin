@@ -3,18 +3,21 @@
  * desktop app uses, so either surface can reuse the other's install.
  *
  * Mirrors the desktop Rust installer: download the latest GitHub Release
- * archive for this host triple, verify its SHA-256 sidecar, extract the
- * `agentero` binary, and point a user-bin shim at it. Shell rc files are
- * never edited.
+ * archive for this host triple, verify its SHA-256 sidecar, and unpack it
+ * under `<data>/Agentero/cli/v-<version>/`. The archive carries the `agentero`
+ * binary beside the PDFium library it loads, and both must stay together.
+ * A user-bin shim points at the install; shell rc files are never edited.
  */
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { unzipSync } from 'fflate'
 import { x as extractTar } from 'tar'
+import { compareVersions, isSupportedVersion, MIN_CLI_VERSION, normalizeVersion, versionsEqual } from './cli-version.js'
 import { runAgentero } from './cli-run.js'
+import { within } from './notes-files.js'
 
 const RELEASE_REPO = 'poco-ai/Agentero'
 const RELEASE_PAGE = `https://github.com/${RELEASE_REPO}/releases/latest`
@@ -27,16 +30,20 @@ let latest: { version: string, at: number } | undefined
 export interface CliStatus {
   /** True when a runnable CLI answered `--version`. */
   available: boolean
+  /** False when that CLI is older than the command catalog this plugin calls. */
+  supported: boolean
   /** Version reported by the resolved CLI. */
   version: string | null
-  /** Resolved executable when `available`. */
+  /** Oldest CLI this plugin can drive. */
+  minimumVersion: string
+  /** Executable the Host runs when `available`. */
   bin: string | null
-  /** Whether the executable came from config or the managed download cache. */
+  /** Whether the executable came from the configured value or the managed download cache. */
   source: 'configured' | 'managed' | null
   /** The configured executable name or path. */
   configured: string
-  /** Managed binary path shared with the desktop app. */
-  managedPath: string
+  /** Newest install under the managed root, shared with the desktop app. */
+  managedPath: string | null
   managedInstalled: boolean
   shimPath: string
   shimInstalled: boolean
@@ -47,14 +54,6 @@ export interface CliStatus {
   /** Rust-style host triple used for the Release asset, when supported. */
   platform: string | null
   releasePageUrl: string
-}
-
-export function normalizeVersion(raw: string): string {
-  return raw.trim().replace(/^v/, '')
-}
-
-export function versionsEqual(a: string, b: string): boolean {
-  return normalizeVersion(a) === normalizeVersion(b)
 }
 
 /** Rust target triple for the running host; release assets use the same names. */
@@ -92,7 +91,7 @@ export function parseSha256File(text: string): string {
   return hex
 }
 
-/** Last whitespace-separated token that starts with a digit (`agentero 0.5.3`). */
+/** Last whitespace-separated token that starts with a digit (`agentero 0.18.1`). */
 export function parseCliVersion(text: string): string | null {
   const line = text.split(/\r?\n/).map(part => part.trim()).find(part => part !== '')
   if (line === undefined) return null
@@ -110,12 +109,33 @@ function dataLocalDir(): string {
   return process.env.XDG_DATA_HOME ?? path.join(homedir(), '.local', 'share')
 }
 
+function innerBinaryName(): string {
+  return process.platform === 'win32' ? 'agentero.exe' : 'agentero'
+}
+
+/** Shared library the CLI loads from its own directory. */
+export function pdfiumLibraryName(): string {
+  if (process.platform === 'win32') return 'pdfium.dll'
+  if (process.platform === 'darwin') return 'libpdfium.dylib'
+  return 'libpdfium.so'
+}
+
 export function managedCliDir(): string {
   return path.join(dataLocalDir(), 'Agentero', 'cli')
 }
 
-export function managedCliBinary(): string {
-  return path.join(managedCliDir(), process.platform === 'win32' ? 'agentero.exe' : 'agentero')
+/** One directory per installed release, as the desktop app lays them out. */
+export function managedVersionDir(version: string): string {
+  return path.join(managedCliDir(), `v-${normalizeVersion(version)}`)
+}
+
+export function managedCliBinary(version: string): string {
+  return path.join(managedVersionDir(version), innerBinaryName())
+}
+
+/** Where earlier plugin versions kept the one binary they downloaded, before the CLI moved to versioned directories. */
+function legacyManagedBinary(): string {
+  return path.join(managedCliDir(), innerBinaryName())
 }
 
 function preferredBinDir(): string {
@@ -151,6 +171,47 @@ async function probeVersion(bin: string): Promise<string | null> {
   const result = await runAgentero(bin, ['--version'], PROBE_TIMEOUT_MS, new Set())
   if (result.timedOut || result.spawnError !== undefined || result.code !== 0) return null
   return parseCliVersion(result.stdout) ?? parseCliVersion(result.stderr)
+}
+
+/** Installed versions under the managed root, newest first. */
+async function managedVersions(): Promise<string[]> {
+  let entries: string[]
+  try {
+    entries = await readdir(managedCliDir())
+  } catch {
+    return []
+  }
+  return entries
+    .filter((name) => /^v-\d+\.\d+\.\d+$/.test(name))
+    .map((name) => name.slice(2))
+    .sort((left, right) => compareVersions(right, left))
+}
+
+/** Executable of the newest install whose file is present. Does not run it. */
+async function newestManagedBinary(): Promise<string | null> {
+  for (const version of await managedVersions()) {
+    const binary = await installedBinary(version)
+    if (binary !== null) return binary
+  }
+  return null
+}
+
+async function installedBinary(version: string): Promise<string | null> {
+  const binary = managedCliBinary(version)
+  return await exists(binary) ? binary : null
+}
+
+/**
+ * Executable the Host runs for a configured value. Two configured paths can
+ * dangle: one under the managed root, which a desktop upgrade replaces, and
+ * the shim, which an uninstall removes. Either falls back to the newest
+ * install, as does the flat binary earlier plugin versions downloaded.
+ */
+export async function resolveCliBin(configured: string): Promise<string> {
+  const value = configured.trim() === '' ? 'agentero' : configured.trim()
+  if (!within(managedCliDir(), value, false) && value !== managedShimPath()) return value
+  if (value !== legacyManagedBinary() && await exists(value)) return value
+  return await newestManagedBinary() ?? value
 }
 
 function errorText(error: unknown): string {
@@ -259,39 +320,100 @@ async function latestReleaseVersion(): Promise<string> {
   return version
 }
 
-function innerBinaryName(): string {
-  return process.platform === 'win32' ? 'agentero.exe' : 'agentero'
+interface CliArchive {
+  executable: Buffer
+  library: Buffer
 }
 
-function extractZip(bytes: Buffer, member: string): Buffer {
+/** Read the executable and the library it needs by file name; neither is optional. */
+async function archiveOf(pick: (member: string) => Promise<Buffer | undefined>): Promise<CliArchive> {
+  const take = async (member: string): Promise<Buffer> => {
+    const data = await pick(member)
+    if (data === undefined || data.length === 0) throw new Error(`CLI archive is missing \`${member}\``)
+    return data
+  }
+  return { executable: await take(innerBinaryName()), library: await take(pdfiumLibraryName()) }
+}
+
+function extractZip(bytes: Buffer): Promise<CliArchive> {
   const files = unzipSync(new Uint8Array(bytes))
-  const key = Object.keys(files).find(name => path.posix.basename(name) === member)
-  const data = key === undefined ? undefined : files[key]
-  if (data === undefined) throw new Error(`CLI archive is missing \`${member}\``)
-  return Buffer.from(data)
+  // A directory entry shares its name with the file it would hold; only files carry data.
+  const members = new Map<string, Buffer>()
+  for (const [name, data] of Object.entries(files)) {
+    if (!name.endsWith('/')) members.set(path.posix.basename(name), Buffer.from(data))
+  }
+  return archiveOf((member) => Promise.resolve(members.get(member)))
 }
 
-async function extractTarGz(bytes: Buffer, member: string): Promise<Buffer> {
+async function extractTarGz(bytes: Buffer): Promise<CliArchive> {
   const dir = await mkdtemp(path.join(tmpdir(), 'agentero-cli-'))
   const archive = path.join(dir, 'cli.tar.gz')
   try {
     await writeFile(archive, bytes)
-    let entryPath: string | undefined
+    const extracted = new Map<string, string>()
     await extractTar({
       file: archive,
       cwd: dir,
       strict: true,
       filter: (entry) => {
-        if (path.basename(entry) !== member) return false
-        entryPath ??= entry
-        return true
+        const name = path.basename(entry)
+        if (name !== innerBinaryName() && name !== pdfiumLibraryName()) return false
+        const first = !extracted.has(name)
+        if (first) extracted.set(name, entry)
+        return first
       },
     })
-    if (entryPath === undefined) throw new Error(`CLI archive is missing \`${member}\``)
-    return await readFile(path.join(dir, entryPath))
+    return await archiveOf((member) => {
+      const entry = extracted.get(member)
+      return entry === undefined ? Promise.resolve(undefined) : readFile(path.join(dir, entry))
+    })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+async function downloadCli(version: string, triple: string): Promise<CliArchive> {
+  const [checksum, archive] = await Promise.all([
+    downloadBuffer(releaseSha256Url(version, triple), 30_000),
+    downloadBuffer(releaseDownloadUrl(version, triple), 180_000),
+  ])
+  const expected = parseSha256File(checksum.toString('utf8'))
+  const actual = createHash('sha256').update(archive).digest('hex')
+  if (actual !== expected) {
+    throw new Error(`CLI archive checksum mismatch (expected ${expected}, got ${actual})`)
+  }
+  return archiveFileName(version, triple).endsWith('.zip') ? extractZip(archive) : extractTarGz(archive)
+}
+
+/**
+ * Unpack one release under the managed root and return its executable.
+ * The pair is staged beside its target and probed there, so a broken
+ * download never replaces a working install and the swap is one rename.
+ */
+async function installVersion(version: string, triple: string): Promise<string> {
+  const { executable, library } = await downloadCli(version, triple)
+  const target = managedVersionDir(version)
+  const binary = managedCliBinary(version)
+  const staging = `${target}.${process.pid}.${Date.now()}.partial`
+  const staged = path.join(staging, innerBinaryName())
+  await mkdir(managedCliDir(), { recursive: true })
+  try {
+    await mkdir(staging)
+    await writeFile(staged, executable, { mode: 0o755 })
+    await writeFile(path.join(staging, pdfiumLibraryName()), library)
+    if (process.platform !== 'win32') await chmod(staged, 0o755)
+    const got = await probeVersion(staged)
+    if (got === null) throw new Error('downloaded CLI does not run (`--version` failed)')
+    if (!versionsEqual(got, version)) {
+      throw new Error(`downloaded CLI version ${got} does not match release ${version}`)
+    }
+    await rm(target, { recursive: true, force: true })
+    await rename(staging, target)
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true })
+    throw error
+  }
+  return binary
 }
 
 async function installShim(binary: string): Promise<void> {
@@ -319,24 +441,26 @@ async function installShim(binary: string): Promise<void> {
   await symlink(binary, shim)
 }
 
-async function probeManaged(managed: string): Promise<string | null> {
-  return await probeVersion(managed)
-}
-
 export async function cliStatus(settings: { agenteroBin: string }): Promise<CliStatus> {
   const configured = settings.agenteroBin.trim() === '' ? 'agentero' : settings.agenteroBin.trim()
-  const managedPath = managedCliBinary()
-  const managedVersion = await probeManaged(managedPath)
-  const configuredVersion = configured === managedPath ? managedVersion : await probeVersion(configured)
+  const managedPath = await newestManagedBinary()
+  const managedVersion = managedPath === null ? null : await probeVersion(managedPath)
+  const bin = await resolveCliBin(configured)
+  const version = bin === managedPath ? managedVersion : await probeVersion(bin)
+  const resolved: { version: string, bin: string, source: 'configured' | 'managed' } | null =
+    version !== null
+      ? { version, bin, source: bin === configured ? 'configured' : 'managed' }
+      : managedVersion !== null && managedPath !== null
+        ? { version: managedVersion, bin: managedPath, source: 'managed' }
+        : null
   const shimPath = managedShimPath()
-  const source: CliStatus['source'] = configuredVersion !== null
-    ? 'configured'
-    : managedVersion !== null ? 'managed' : null
   return {
-    available: source !== null,
-    version: configuredVersion ?? managedVersion,
-    bin: configuredVersion !== null ? configured : managedVersion !== null ? managedPath : null,
-    source,
+    available: resolved !== null,
+    supported: resolved !== null && isSupportedVersion(resolved.version),
+    version: resolved?.version ?? null,
+    minimumVersion: MIN_CLI_VERSION,
+    bin: resolved?.bin ?? null,
+    source: resolved?.source ?? null,
     configured,
     managedPath,
     managedInstalled: managedVersion !== null,
@@ -351,7 +475,7 @@ export async function cliStatus(settings: { agenteroBin: string }): Promise<CliS
 
 /**
  * Download and install the latest CLI, then point the config at it when the
- * user still uses the default `agentero` name. Returns the fresh status.
+ * user still relies on a default. Returns the fresh status.
  */
 export async function installManagedCli(
   settings: { agenteroBin: string },
@@ -362,47 +486,14 @@ export async function installManagedCli(
     throw new Error(`Agentero CLI is not published for ${process.platform}/${process.arch}. Open ${RELEASE_PAGE}`)
   }
   const version = await latestReleaseVersion()
-  const managed = managedCliBinary()
-  const current = await probeManaged(managed)
-  if (current !== null && versionsEqual(current, version)) {
-    await installShim(managed)
-  } else {
-    const [checksum, archive] = await Promise.all([
-      downloadBuffer(releaseSha256Url(version, triple), 30_000),
-      downloadBuffer(releaseDownloadUrl(version, triple), 180_000),
-    ])
-    const expected = parseSha256File(checksum.toString('utf8'))
-    const actual = createHash('sha256').update(archive).digest('hex')
-    if (actual !== expected) {
-      throw new Error(`CLI archive checksum mismatch (expected ${expected}, got ${actual})`)
-    }
-    const member = innerBinaryName()
-    const binary = archiveFileName(version, triple).endsWith('.zip')
-      ? extractZip(archive, member)
-      : await extractTarGz(archive, member)
-    await mkdir(managedCliDir(), { recursive: true })
-    const partial = `${managed}.${process.pid}.${Date.now()}.partial`
-    try {
-      await writeFile(partial, binary, { mode: 0o755 })
-      if (process.platform !== 'win32') await chmod(partial, 0o755)
-      const got = await probeVersion(partial)
-      if (got === null) throw new Error('downloaded CLI does not run (`--version` failed)')
-      if (!versionsEqual(got, version)) {
-        throw new Error(`downloaded CLI version ${got} does not match release ${version}`)
-      }
-      await rm(managed, { force: true })
-      await rename(partial, managed)
-      if (process.platform !== 'win32') await chmod(managed, 0o755)
-    } catch (error) {
-      await rm(partial, { force: true })
-      throw error
-    }
-    await installShim(managed)
-  }
+  const binary = await installedBinary(version) ?? await installVersion(version, triple)
+  await installShim(binary)
   const configured = settings.agenteroBin.trim()
-  if (configured === '' || configured === 'agentero') {
-    await persistBin(managed).catch(() => {
-      // The config writer is best-effort here; cliStatus still falls back to the managed binary.
+  if (configured === '' || configured === 'agentero' || configured === legacyManagedBinary()) {
+    // The shim follows later upgrades. Windows runs a `.cmd` entry only through
+    // a shell, which `runAgentero` keeps off, so it pins the executable instead.
+    await persistBin(process.platform === 'win32' ? binary : managedShimPath()).catch(() => {
+      // The config writer is best-effort here; cliStatus still finds the managed binary.
     })
   }
   return cliStatus(settings)
