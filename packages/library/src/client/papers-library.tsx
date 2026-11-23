@@ -125,10 +125,10 @@ export function LibraryPanel({
       reload()
     })
   }, [reload, removeTag, run])
-  const setReadFor = useCallback((ref: string, read: boolean): void => {
+  const setReadFor = useCallback((paper: PaperRow, read: boolean): void => {
     void run(async () => {
-      await setRead(ref, read)
-      setPapers(current => current.map(paper => paper.openId === ref ? { ...paper, isRead: read } : paper))
+      await setRead(paper.openId, read, paper.revision)
+      setPapers(current => current.map(row => row.openId === paper.openId ? { ...row, isRead: read } : row))
       reload()
     })
   }, [reload, run, setRead])

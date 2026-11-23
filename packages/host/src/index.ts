@@ -8,8 +8,8 @@ import * as path from 'node:path'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { cliStatus, installManagedCli } from './cli-install.js'
-import { cliFailure, runAgentero } from './cli-run.js'
+import { cliStatus, installManagedCli, resolveCliBin } from './cli-install.js'
+import { runCliJson } from './cli-run.js'
 import {
   changeTag, deletePaper, discoverArxiv, downloadPaper, exportBib, importBib, importId, setRead,
 } from './catalog.js'
@@ -17,6 +17,7 @@ import { listVaultNotes, locateVaultPath, readVaultFile, within, writeVaultNote 
 import { deleteMark, type MarkRect, readMarks, writeMark } from './marks-store.js'
 import { bookmarkNodesFrom, writePdfBookmarks } from './bookmarks-write.js'
 import { locateVaultPdf, readVaultPdf } from './pdf-file.js'
+import { listPapers } from './paper-list.js'
 import { registerTools } from './tools.js'
 import { createTranslator, translationTarget, type TranslateText, type TranslationLlm, type DefaultTranslationModel } from './translate.js'
 import { isAllowedApiHost } from './api-host.js'
@@ -98,7 +99,7 @@ const PDF_BOOKMARKS_PATH = '/agentero/api/pdf/bookmarks'
 const PDFIUM_WASM_PATH = '/agentero/api/pdfium.wasm'
 const require = createRequire(import.meta.url)
 
-/** List or add reading marks through the Agentero CLI. */
+/** List or add reading marks. Reads go to disk; adds without selection geometry go through `agentero annotation add`. */
 const MARKS_PATH = '/agentero/api/marks'
 /** Serve the PNG crop behind a visual region mark. */
 const MARK_ASSET_PATH = '/agentero/api/marks/asset'
@@ -121,7 +122,7 @@ const TAGS_PATH = '/agentero/api/papers/tags'
 /** Move a paper to the recycle bin. */
 const DELETE_PATH = '/agentero/api/papers/delete'
 
-/** Set `is_read`. */
+/** Set the reading state at the revision the row was listed with. */
 const READ_PATH = '/agentero/api/papers/read'
 
 /** Download a missing PDF. */
@@ -129,9 +130,6 @@ const DOWNLOAD_PATH = '/agentero/api/papers/download'
 
 /** Short arXiv ranking for one keyword. */
 const DISCOVER_PATH = '/agentero/api/discover'
-
-/** Bound for one `paper list` or `mark list` process. A timeout kills the child. */
-const PAPER_LIST_TIMEOUT_MS = 20_000
 
 /** Scaffolding a vault writes the catalog and bundled skills. */
 const VAULT_CREATE_TIMEOUT_MS = 60_000
@@ -319,23 +317,12 @@ async function handlePapers(
     return
   }
   if (!requireVault(settings, res)) return
-  const result = await runAgentero(settings.agenteroBin, [
-    '--vault', settings.vault,
-    '--json',
-    'paper', 'list',
-    '--fields', 'year,authors,tags,date,is_read',
-  ], PAPER_LIST_TIMEOUT_MS, children)
-  if (result.timedOut || result.spawnError !== undefined || result.code !== 0) {
-    sendJson(res, 502, { error: cliFailure(result, 'agentero paper list') })
+  const listed = await listPapers(settings, children)
+  if (!listed.ok) {
+    sendJson(res, 502, { error: listed.failure.message })
     return
   }
-  try {
-    JSON.parse(result.stdout)
-  } catch {
-    sendJson(res, 502, { error: 'agentero paper list returned invalid JSON' })
-    return
-  }
-  sendRawJson(res, result.stdout)
+  sendJson(res, 200, { items: listed.rows })
 }
 
 async function handleNotesList(settings: HostSettings, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -609,24 +596,6 @@ function markAddFrom(raw: string): MarkAddBody | undefined {
   }
 }
 
-async function finishCliJson(
-  res: ServerResponse,
-  result: Awaited<ReturnType<typeof runAgentero>>,
-  label: string,
-): Promise<void> {
-  if (result.timedOut || result.spawnError !== undefined || result.code !== 0) {
-    sendJson(res, 502, { error: cliFailure(result, label) })
-    return
-  }
-  try {
-    JSON.parse(result.stdout)
-  } catch {
-    sendJson(res, 502, { error: `${label} returned invalid JSON` })
-    return
-  }
-  sendRawJson(res, result.stdout)
-}
-
 async function handleMarks(
   settings: HostSettings,
   req: IncomingMessage,
@@ -726,20 +695,46 @@ async function handleMarks(
     sendJson(res, 200, { ok: true, ids: written.ids, path: written.path, ...(result === undefined ? {} : { marks: [{ result }] }) })
     return
   }
+  // No selection geometry: the CLI locates the quote in the PDF instead.
+  // A visual region is defined by its geometry alone, so it never gets here.
+  if (body.kind === 'visual') {
+    sendJson(res, 400, { error: 'visual marks require selection rectangles and page size' })
+    return
+  }
+  // A quote that repeats on the page marks its first occurrence.
   const args = [
     '--vault', settings.vault,
     '--json',
-    'mark', 'add', body.ref,
+    'annotation', 'add', body.ref,
     '--kind', body.kind,
     '--quote', body.quote,
     '--page', String(body.page),
+    '--occurrence', '1',
   ]
   if (body.color !== undefined) args.push('--mark-color', body.color)
   if (body.comment !== undefined) args.push('--comment', body.comment)
   if (body.question !== undefined) args.push('--question', body.question)
-  if (body.to !== undefined) args.push('--to', body.to)
-  const result = await runAgentero(settings.agenteroBin, args, MARK_ADD_TIMEOUT_MS, children)
-  await finishCliJson(res, result, 'agentero mark add')
+  const added = await runCliJson(
+    await resolveCliBin(settings.agenteroBin),
+    args,
+    MARK_ADD_TIMEOUT_MS,
+    children,
+    'agentero annotation add',
+  )
+  if (!added.ok) {
+    sendJson(res, 502, { error: added.failure.message })
+    return
+  }
+  sendJson(res, 200, { ok: true, ids: markIdsOf(added.data) })
+}
+
+/** Ids of the marks `annotation add` reports. */
+function markIdsOf(data: unknown): string[] {
+  if (data === null || typeof data !== 'object' || !Array.isArray((data as { items?: unknown }).items)) return []
+  return (data as { items: unknown[] }).items.flatMap((item) => {
+    const id = item !== null && typeof item === 'object' ? (item as { id?: unknown }).id : undefined
+    return typeof id === 'string' && id !== '' ? [id] : []
+  })
 }
 
 /** Serve one PNG crop stored under `<paper>/marks/assets`. */
@@ -967,30 +962,22 @@ async function handleVaultCreate(
     sendJson(res, 400, { error: 'invalid path' })
     return
   }
-  const result = await runAgentero(
-    settings.agenteroBin,
+  // `vault create` answers with the vault it selected: `{ path, outcome, … }`.
+  const created = await runCliJson(
+    await resolveCliBin(settings.agenteroBin),
     ['--json', 'vault', 'create', input],
     VAULT_CREATE_TIMEOUT_MS,
     children,
+    'agentero vault create',
   )
-  if (result.timedOut || result.spawnError !== undefined || result.code !== 0) {
-    sendJson(res, 502, { error: cliFailure(result, 'agentero vault create') })
+  if (!created.ok) {
+    sendJson(res, 502, { error: created.failure.message })
     return
   }
-  let created = input
+  const record = created.data
+  const createdPath = record !== null && typeof record === 'object' ? (record as { path?: unknown }).path : undefined
   try {
-    const parsed = JSON.parse(result.stdout) as { ok?: unknown, data?: unknown }
-    if (parsed.ok !== true) throw new Error('command failed')
-    if (parsed.data !== null && typeof parsed.data === 'object' && 'path' in parsed.data
-      && typeof parsed.data.path === 'string' && parsed.data.path !== '') {
-      created = parsed.data.path
-    }
-  } catch {
-    sendJson(res, 502, { error: 'agentero vault create returned invalid JSON' })
-    return
-  }
-  try {
-    sendJson(res, 200, await vaultHost.save(created))
+    sendJson(res, 200, await vaultHost.save(typeof createdPath === 'string' && createdPath !== '' ? createdPath : input))
   } catch (error) {
     if (error instanceof Error && error.message === 'invalid vault') sendJson(res, 400, { error: 'invalid vault' })
     else throw error
@@ -1104,11 +1091,12 @@ async function handleReadFlag(
   const body = await readObject(req, res)
   if (body === undefined) return
   const ref = typeof body.ref === 'string' ? body.ref.trim() : ''
-  if (ref === '' || typeof body.read !== 'boolean') {
+  const revision = typeof body.revision === 'string' ? body.revision.trim() : ''
+  if (ref === '' || typeof body.read !== 'boolean' || revision === '') {
     sendJson(res, 400, { error: 'invalid body' })
     return
   }
-  await sendCatalog(res, await setRead(settings, ref, body.read, children))
+  await sendCatalog(res, await setRead(settings, ref, body.read, revision, children))
 }
 
 async function handleDownload(

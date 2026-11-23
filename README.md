@@ -29,7 +29,7 @@
 
 ## 安装
 
-需要 dsh 0.2.x、Node.js 24.9+、一个 Agentero Vault，以及 Agentero CLI。
+需要 dsh 0.2.x、Node.js 24.9+、一个 Agentero Vault，以及 Agentero CLI 0.18+。
 
 插件已发布到 npm，直接安装：
 
@@ -45,7 +45,7 @@ dsh web --no-open
 
 看到 `[agentero] plugin loaded` 后打开终端打印的链接。在侧边栏「插件」中打开 `agentero-dsh`，点击 `agentero-host` 行的「配置」；也可以从「更多」→「设置」→「Agentero」进入同一份配置表单：
 
-- **Agentero CLI**：点右侧「安装」会从 GitHub Release 下载与本机匹配的官方 CLI，校验 SHA-256 后写入用户目录，并把可执行文件路径填好。桌面端已经装过 CLI 时可直接复用。
+- **Agentero CLI**：点右侧「安装」会从 GitHub Release 下载与本机匹配的官方 CLI，校验 SHA-256 后连同配套的 PDFium 写入用户目录，并把可执行文件路径填好。安装位置与桌面端共用，桌面端已经装过 CLI 时直接复用；版本低于 0.18 时这里会提示更新。
 - **新建知识库**：选择一个目录，插件调用 `agentero vault create` 生成 `papers/`、`notes/`、`.agentero/catalog.sqlite` 等结构并切换过去。已有 Vault 仍用「选择目录」打开。
 
 ![在 dsh 设置中查看 CLI 状态、创建知识库，并进入 Agentero 桌面版](assets/settings.png)

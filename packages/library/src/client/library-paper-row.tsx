@@ -15,11 +15,12 @@ type LibraryPaperRowProps = {
   paper: PaperRow
   ctx: CellCtx
   busy: boolean
-  /** Handlers take the row's ref so the panel can keep one stable identity per action. */
+  /** Handlers take the row so the panel can keep one stable identity per action. */
   onOpen: (ref: string) => void
   onDownload: (ref: string) => void
   onDelete: (ref: string) => void
-  onSetRead: (ref: string, read: boolean) => void
+  /** Changing the reading state also needs the revision the row was listed at. */
+  onSetRead: (paper: PaperRow, read: boolean) => void
 }
 
 function ignoresRowOpen(target: EventTarget | null): boolean {
@@ -70,7 +71,7 @@ export const LibraryPaperRow = memo(function LibraryPaperRow({
           </DropdownMenu.Trigger>
           <LibraryMenuContent align='end' onClick={(event) => { event.stopPropagation() }} onKeyDown={(event) => { event.stopPropagation() }}>
             <LibraryMenuItem onSelect={open}><BookOpen aria-hidden />{ctx.t('openPaper')}</LibraryMenuItem>
-            <LibraryMenuItem disabled={busy || paper.openId === ''} onSelect={() => { onSetRead(paper.openId, paper.isRead !== true) }}>
+            <LibraryMenuItem disabled={busy || paper.openId === ''} onSelect={() => { onSetRead(paper, paper.isRead !== true) }}>
               {paper.isRead === true ? <Circle aria-hidden /> : <Check aria-hidden />}{ctx.t(paper.isRead === true ? 'markUnread' : 'markRead')}
             </LibraryMenuItem>
             <LibraryMenuItem disabled={busy} onSelect={() => { onDownload(paper.openId) }}><Download aria-hidden />{ctx.t('download')}</LibraryMenuItem>

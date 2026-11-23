@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
-import { cliFailure, runAgentero } from './cli-run.js'
+import { resolveCliBin } from './cli-install.js'
+import { runCliJson, type CliCall, type CliJson } from './cli-run.js'
 
 /** Network-backed CLI calls: import, download, BibTeX, arXiv discovery. */
 const NETWORK_MS = 120_000
@@ -16,7 +17,12 @@ export type CatalogResult =
   | { status: 200, raw: string }
   | { status: 502, error: string }
 
-async function cliJson(
+function sent(result: CliJson): CatalogResult {
+  return result.ok ? { status: 200, raw: result.raw } : { status: 502, error: result.failure.message }
+}
+
+/** Run one `--json` command against the configured vault and keep its document as the response body. */
+async function catalogJson(
   settings: CatalogSettings,
   args: readonly string[],
   timeoutMs: number,
@@ -24,49 +30,47 @@ async function cliJson(
   children: Set<ChildProcess>,
   stdin?: string,
 ): Promise<CatalogResult> {
-  const result = await runAgentero(settings.agenteroBin, [
+  const bin = await resolveCliBin(settings.agenteroBin)
+  return sent(await runCliJson(bin, [
     '--vault', settings.vault,
     '--json',
     ...args,
-  ], timeoutMs, children, stdin)
-  if (result.timedOut || result.spawnError !== undefined || result.code !== 0) {
-    return { status: 502, error: cliFailure(result, label) }
-  }
-  try {
-    JSON.parse(result.stdout)
-  } catch {
-    return { status: 502, error: `${label} returned invalid JSON` }
-  }
-  return { status: 200, raw: result.stdout }
+  ], timeoutMs, children, label, stdin))
 }
 
-/** `agentero import id`. `text` is an arXiv id, DOI, or URL. */
+/** `paper import id`. `text` is an arXiv id, DOI, or URL. */
 export function importId(
   settings: CatalogSettings,
   text: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(settings, ['import', 'id', '--', text], NETWORK_MS, 'agentero import id', children)
+  return catalogJson(settings, ['paper', 'import', 'id', '--', text], NETWORK_MS, 'agentero paper import id', children)
 }
 
-/** `agentero import bib -`, with the BibTeX document on stdin. */
+/** `paper import bib -`, with the bibliography document on stdin. */
 export function importBib(
   settings: CatalogSettings,
   text: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(settings, ['import', 'bib', '-'], NETWORK_MS, 'agentero import bib', children, text)
+  return catalogJson(settings, ['paper', 'import', 'bib', '-'], NETWORK_MS, 'agentero paper import bib', children, text)
 }
 
-/** `agentero export bib`. JSON `data.content` is the BibTeX. */
+/** `paper export`. The document's `content` member is the BibTeX. */
 export function exportBib(
   settings: CatalogSettings,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(settings, ['export', 'bib'], NETWORK_MS, 'agentero export bib', children)
+  return catalogJson(
+    settings,
+    ['paper', 'export', '--format', 'bibtex', '--output', '-'],
+    NETWORK_MS,
+    'agentero paper export',
+    children,
+  )
 }
 
-/** Append or remove one tag. The ref is a vault-relative paper path or id. */
+/** Append or remove tags. The ref is a vault-relative paper path or id. */
 export function changeTag(
   settings: CatalogSettings,
   ref: string,
@@ -74,43 +78,72 @@ export function changeTag(
   tag: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(
+  return catalogJson(
     settings,
-    ['paper', 'tag', op, ref, '--', tag],
+    ['paper', 'tag', op === 'add' ? 'add' : 'remove', ref, '--', tag],
     LOCAL_MS,
     'agentero paper tag',
     children,
   )
 }
 
-/** Move a paper directory to the vault recycle bin. Does not pass `--files`. */
+/** Move a paper folder to the vault trash through `file remove`. The receipt carries a recovery id. */
 export function deletePaper(
   settings: CatalogSettings,
   ref: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(settings, ['paper', 'delete', ref], LOCAL_MS, 'agentero paper delete', children)
+  return catalogJson(settings, ['file', 'remove', '--', ref], LOCAL_MS, 'agentero file remove', children)
 }
 
-/** Set catalog `is_read`. */
-export function setRead(
+function revisionOf(data: unknown): string | undefined {
+  const revision = data !== null && typeof data === 'object' ? (data as { revision?: unknown }).revision : undefined
+  return typeof revision === 'string' && revision !== '' ? revision : undefined
+}
+
+/**
+ * Set the reading state. `paper update` takes the revision the caller listed
+ * the row at, so a row changed in between is refused rather than overwritten.
+ * Reading state is one field, so one retry at the current revision is safe.
+ */
+export async function updateReadState(call: CliCall, ref: string, read: boolean, revision: string): Promise<CliJson> {
+  const update = (token: string): Promise<CliJson> => call([
+    'paper', 'update', ref,
+    '--state', read ? 'read' : 'unread',
+    '--if-revision', token,
+  ], 'agentero paper update')
+  const first = await update(revision)
+  if (first.ok || first.failure.code !== 'revision_conflict') return first
+  const current = await call(['paper', 'get', ref], 'agentero paper get')
+  const token = current.ok ? revisionOf(current.data) : undefined
+  return token === undefined ? first : update(token)
+}
+
+export async function setRead(
   settings: CatalogSettings,
   ref: string,
   read: boolean,
+  revision: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  const args = ['paper', 'set-read', ref]
-  if (!read) args.push('--false')
-  return cliJson(settings, args, LOCAL_MS, 'agentero paper set-read', children)
+  const bin = await resolveCliBin(settings.agenteroBin)
+  const call: CliCall = (args, label) => runCliJson(
+    bin,
+    ['--vault', settings.vault, '--json', ...args],
+    LOCAL_MS,
+    children,
+    label,
+  )
+  return sent(await updateReadState(call, ref, read, revision))
 }
 
-/** Download the PDF for a paper already in the catalog. */
+/** Download the missing assets of a paper already in the catalog. */
 export function downloadPaper(
   settings: CatalogSettings,
   ref: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(settings, ['paper', 'download', ref], NETWORK_MS, 'agentero paper download', children)
+  return catalogJson(settings, ['paper', 'download', ref], NETWORK_MS, 'agentero paper download', children)
 }
 
 /** Rank a short arXiv list for one keyword. Already-imported ids are dropped by the CLI. */
@@ -119,11 +152,11 @@ export function discoverArxiv(
   keyword: string,
   children: Set<ChildProcess>,
 ): Promise<CatalogResult> {
-  return cliJson(
+  return catalogJson(
     settings,
-    ['discover', 'arxiv', '--keyword', keyword, '--top', '8'],
+    ['paper', 'discover', '--keyword', keyword, '--limit', '8'],
     NETWORK_MS,
-    'agentero discover arxiv',
+    'agentero paper discover',
     children,
   )
 }

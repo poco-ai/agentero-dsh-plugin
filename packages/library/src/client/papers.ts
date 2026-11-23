@@ -23,7 +23,8 @@ export interface LibraryFace {
   removeTag(ref: string, tag: string): Promise<void>
   deletePaper(ref: string): Promise<void>
   download(ref: string): Promise<void>
-  setRead(ref: string, read: boolean): Promise<void>
+  /** Change the reading state of a row listed at `revision`. */
+  setRead(ref: string, read: boolean, revision: string): Promise<void>
 }
 
 export interface PaperTag {
@@ -38,8 +39,10 @@ export interface PaperRow {
   authors: string
   year: string
   tags: PaperTag[]
-  /** null means an older CLI omitted the reading state. */
+  /** null means the Host could not tell the reading state. */
   isRead: boolean | null
+  /** Catalog revision the row was listed at; changing its reading state requires it. */
+  revision: string
 }
 
 export function errorText(body: unknown): string | undefined {
@@ -53,24 +56,18 @@ export function errorText(body: unknown): string | undefined {
 }
 
 /**
- * Rows from the CLI JSON document.
- * `--json` prints `{ ok: true, data: [...] }`. `data` is the slim list
- * (`id`, `path`, `title`, `year`, `authors`, `tags`, `date`, `is_read`). A bare array
- * or `{ items: [...] }` is accepted as well.
+ * Rows from the Host's list document. `paper list` is paged and carries only
+ * identity, state, tags, and a revision, so the Host completes every row with
+ * `paper get` before answering `{ items: [...] }`.
  */
 function paperItems(body: unknown): unknown[] | undefined {
-  if (Array.isArray(body)) return body
-  if (body === null || typeof body !== 'object') return undefined
-  const record = body as Record<string, unknown>
-  if (record.ok === false) return undefined
-  if (Array.isArray(record.items)) return record.items
-  const data = record.data
-  if (Array.isArray(data)) return data
-  if (data !== null && typeof data === 'object') {
-    const nested = data as Record<string, unknown>
-    if (Array.isArray(nested.items)) return nested.items
-  }
-  return undefined
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined
+  const items = (body as Record<string, unknown>).items
+  return Array.isArray(items) ? items : undefined
+}
+
+function recordOf(body: unknown): Record<string, unknown> | undefined {
+  return body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : undefined
 }
 
 function authorsText(value: unknown): string {
@@ -108,15 +105,6 @@ function tagsFrom(value: unknown): PaperTag[] {
   return tags
 }
 
-function yearText(record: Record<string, unknown>): string {
-  const year = record.year
-  if (typeof year === 'number' && Number.isFinite(year)) return String(year)
-  if (typeof year === 'string' && year.trim() !== '') return year.trim()
-  const date = record.date
-  if (typeof date === 'string' && date.trim() !== '') return date.trim()
-  return ''
-}
-
 function toRow(item: unknown, index: number): PaperRow | undefined {
   if (item === null || typeof item !== 'object') return undefined
   const record = item as Record<string, unknown>
@@ -129,16 +117,14 @@ function toRow(item: unknown, index: number): PaperRow | undefined {
     openId,
     title,
     authors: authorsText(record.authors),
-    year: yearText(record),
+    year: typeof record.year === 'string' ? record.year.trim() : '',
     tags: tagsFrom(record.tags),
-    isRead: typeof record.is_read === 'boolean' ? record.is_read : null,
+    isRead: record.state === 'read' ? true : record.state === 'unread' ? false : null,
+    revision: typeof record.revision === 'string' ? record.revision : '',
   }
 }
 
 export function papersFrom(body: unknown): PaperRow[] {
-  if (body !== null && typeof body === 'object' && !Array.isArray(body) && (body as { ok?: unknown }).ok === false) {
-    throw new Error(errorText(body) ?? 'invalid papers response')
-  }
   const items = paperItems(body)
   if (items === undefined) throw new Error('invalid papers response')
   const rows: PaperRow[] = []
@@ -180,36 +166,25 @@ export async function postJson(url: string, body: unknown, request: (url: string
   return parsed
 }
 
-function dataRecord(body: unknown): Record<string, unknown> | undefined {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined
-  const record = body as Record<string, unknown>
-  if (record.data !== null && typeof record.data === 'object' && !Array.isArray(record.data)) {
-    return record.data as Record<string, unknown>
-  }
-  return record
-}
-
+/** Candidates from `paper discover`: each item has an `identifier`, such as an arXiv id. */
 export function discoverItems(body: unknown): { id: string, title: string }[] {
-  const data = dataRecord(body)
-  const items = data?.items
+  const items = recordOf(body)?.items
   if (!Array.isArray(items)) return []
   const rows: { id: string, title: string }[] = []
   for (const item of items) {
-    if (item === null || typeof item !== 'object') continue
-    const record = item as Record<string, unknown>
-    const id = typeof record.arxivId === 'string'
-      ? record.arxivId
-      : typeof record.arxiv_id === 'string' ? record.arxiv_id : ''
-    if (id.trim() === '') continue
+    const record = recordOf(item)
+    if (record === undefined || typeof record.identifier !== 'string') continue
+    const id = record.identifier.trim()
+    if (id === '') continue
     const title = typeof record.title === 'string' && record.title.trim() !== '' ? record.title : id
     rows.push({ id, title })
   }
   return rows
 }
 
+/** BibTeX from `paper export`, which keeps the document in `content`. */
 export function bibText(body: unknown): string {
-  const data = dataRecord(body)
-  const content = data?.content
+  const content = recordOf(body)?.content
   return typeof content === 'string' ? content : ''
 }
 
@@ -221,9 +196,11 @@ export function filterPapers(papers: PaperRow[], query: string, unreadOnly: bool
   ))
 }
 
-export async function setPaperRead(ref: string, read: boolean, request: (url: string, init?: RequestInit) => Promise<Response>): Promise<void> {
-  const body = await postJson('/agentero/api/papers/read', { ref, read }, request)
-  if (body !== null && typeof body === 'object' && 'ok' in body && body.ok === false) {
-    throw new Error(errorText(body) ?? '')
-  }
+export async function setPaperRead(
+  ref: string,
+  read: boolean,
+  revision: string,
+  request: (url: string, init?: RequestInit) => Promise<Response>,
+): Promise<void> {
+  await postJson('/agentero/api/papers/read', { ref, read, revision }, request)
 }

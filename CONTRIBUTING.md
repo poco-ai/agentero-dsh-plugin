@@ -39,7 +39,7 @@ motif/
 
 ## 体验
 
-宿主仍然是上面的并列检出，供 `pnpm dsh` 启动源码版。插件自身的类型检查改用 npm 上的 `@deepseek-ai/*` 包，不再读取旁边的检出。看文献和 PDF 还需要一份已经有论文的 Agentero Vault（含 `papers/` 和 `.agentero/catalog.sqlite`），以及本仓库上层 Motif 编出来的 `agentero-cli`。
+宿主仍然是上面的并列检出，供 `pnpm dsh` 启动源码版。插件自身的类型检查改用 npm 上的 `@deepseek-ai/*` 包，不再读取旁边的检出。看文献和 PDF 还需要一份已经有论文的 Agentero Vault（含 `papers/` 和 `.agentero/catalog.sqlite`），以及本仓库上层 Motif 编出来的 `agentero-cli`（0.18 及以上）。
 
 先构建宿主、插件和 CLI：
 
@@ -114,7 +114,9 @@ profile 目录不属于任何一个 Git 仓库。
 
 每个包的 Node 入口导出 `name` 与 `apply`。带界面的包另外声明 `dsh.client.platform: web`，`exports["./client"]` 指向 `lib/client.js`。这个文件以 `window.__ModuleLoader__.load` 开头，React 和 `@deepseek-ai/dsh-client-*` 保持为外部 `require()`。
 
-Host 的 Node 插件名是 `agentero-host`。它读取可选配置 `vault`（默认 `""`）、`agenteroBin`（默认 `"agentero"`）和 `agenteroSettings`（默认 `$XDG_CONFIG_HOME/agentero/settings.json`），并在加载时打印 `[agentero] plugin loaded`。`vault`、`agenteroBin`、`recentVaults` 是 `.volatile()` 字段，运行时通过 `Volatile.get()` 读取，所以 Plugins 页保存后立即生效，不需要重挂载。浏览器入口提供名为 `agentero` 的服务。Host 在 `/agentero/api` 下提供论文列表、PDF 字节、标注，以及 `<vault>/notes` 的笔记列表和文件读写。`PUT` 还可以写 `papers/<id>/NOTES.md`。文献面板列出论文。笔记面板列出并编辑 `notes/`，并填进 PDF 右侧的论文笔记槽。PDF 面板用 EmbedPDF / PDFium 阅读，划词后调用 `agentero mark add`。它注册两个资源地址：vault 内的 `*.pdf` 文件，以及用论文目录表示的 `dsh-resource://agentero-paper/<论文目录>`。文献库点一行走后者，因为右侧标签页跨刷新只保留地址，不保留导航参数。Host 另外提供 `GET /agentero/api/pdfium.wasm`。
+Host 的 Node 插件名是 `agentero-host`。它读取可选配置 `vault`（默认 `""`）、`agenteroBin`（默认 `"agentero"`）和 `agenteroSettings`（默认 `$XDG_CONFIG_HOME/agentero/settings.json`），并在加载时打印 `[agentero] plugin loaded`。`vault`、`agenteroBin`、`recentVaults` 是 `.volatile()` 字段，运行时通过 `Volatile.get()` 读取，所以 Plugins 页保存后立即生效，不需要重挂载。浏览器入口提供名为 `agentero` 的服务。Host 在 `/agentero/api` 下提供论文列表、PDF 字节、标注，以及 `<vault>/notes` 的笔记列表和文件读写。`PUT` 还可以写 `papers/<id>/NOTES.md`。文献面板列出论文。笔记面板列出并编辑 `notes/`，并填进 PDF 右侧的论文笔记槽。PDF 面板用 EmbedPDF / PDFium 阅读；划词得到的选区坐标由 Host 直接写入 `marks/`，与桌面端共用同一套标注格式。它注册两个资源地址：vault 内的 `*.pdf` 文件，以及用论文目录表示的 `dsh-resource://agentero-paper/<论文目录>`。文献库点一行走后者，因为右侧标签页跨刷新只保留地址，不保留导航参数。Host 另外提供 `GET /agentero/api/pdfium.wasm`。
+
+Host 只调用 Agentero CLI 0.18 起的命令目录（`paper` / `annotation` / `file` / `vault`）。成功时 stdout 直接是 JSON 文档，失败时 stderr 是 `{ error: { code, message, hint } }`，列表命令按 `--limit` 和 `--cursor` 分页。适配层分三处：`cli-run.ts` 负责调用、错误解析和翻页，`catalog.ts` 对应单条命令，`paper-list.ts` 负责文献列表——`paper list` 只带标题、阅读状态、标签和 revision，作者与年份由每篇一次 `paper get` 补全并按 revision 缓存；改已读状态要带上列表里的 revision（`paper update --if-revision`）。这些纯逻辑的测试在 `packages/host/tests/cli.test.ts`。`cli-install.ts` 把 CLI 装到与桌面端相同的 `<data>/Agentero/cli/v-<版本>/`，二进制旁边必须保留同一压缩包里的 PDFium，文本定位靠它加载。
 
 设置页在 `packages/host/src/client/settings.tsx`，同时注册到 Settings 的 `settings.section`（导航名 `Agentero`）和插件详情页的 `plugins.row.config`（key 为 `agentero-dsh#agentero-host`）。两个入口共用 `AgenteroSettings` 与同一个 `AgenteroSettingsModel`；插件页的 summary 仅显示摘要，page 显示完整表单，不使用 owner 提供的通用 form。插件页契约通过 `@deepseek-ai/dsh-client-ui-plugin-manager/client` 的 type-only import 引入，注册由 `ctx.slots.inject` 管理生命周期。CLI 字段通过 `ctx.configForms.get('agentero-host')` 走 dsh 的配置表单，`settings-model.ts` 负责草稿和保存；知识库走会校验目录的 `PUT /agentero/api/vault`，成功后刷新页面。文献面板只读取当前知识库，不再提供切换器。`packages/host` 单独配置了 shadcn（`components.json`，别名 `@/*` 指向 `src/client/*`）；新增原子组件可以 `cd packages/host && npx shadcn@latest add <name>`，也可以照 `src/client/ui/` 现有写法手写。其他面板各自维护自己的组件。
 

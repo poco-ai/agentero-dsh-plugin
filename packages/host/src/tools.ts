@@ -1,8 +1,8 @@
 import type { ChildProcess } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { discoverArxiv, importId, type CatalogSettings } from './catalog.js'
-import { cliFailure, runAgentero } from './cli-run.js'
 import { listVaultNotes, readVaultFile } from './notes-files.js'
+import { listPapers } from './paper-list.js'
 
 /** How many catalog rows a tool result may carry. */
 const PAPER_CAP = 40
@@ -54,27 +54,6 @@ function stringArg(args: unknown, key: string): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-async function paperList(settings: CatalogSettings, query: string, children: Set<ChildProcess>): Promise<unknown> {
-  const args = [
-    '--vault', settings.vault,
-    '--json',
-    'paper', 'list',
-    '--fields', 'year,authors,tags,date,is_read',
-  ]
-  if (query !== '') args.push('--query', query)
-  const result = await runAgentero(settings.agenteroBin, args, 20_000, children)
-  if (result.timedOut || result.spawnError !== undefined || result.code !== 0) {
-    throw new Error(cliFailure(result, 'agentero paper list'))
-  }
-  const parsed: unknown = JSON.parse(result.stdout)
-  const data = record(parsed)?.data
-  const rows = Array.isArray(data) ? data : []
-  return {
-    papers: rows.slice(0, PAPER_CAP),
-    truncated: rows.length > PAPER_CAP,
-  }
-}
-
 /**
  * Register model tools that read and import the same vault as the panels.
  * @returns Disposer that unregisters every tool.
@@ -88,7 +67,7 @@ export function registerTools(
   const dispose: (() => void)[] = []
   dispose.push(tools.register({
     name: 'agentero_list_papers',
-    description: 'List papers already in the Agentero vault. Paths are vault-relative, such as papers/<id>. Do not invent a second catalog.',
+    description: 'List papers already in the Agentero vault, newest first and at most 40 rows. Each row has id, a vault-relative path such as papers/<id>, title, authors, year, tags, state (read or unread), and a revision. Pass a query to filter; do not invent a second catalog.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -99,7 +78,9 @@ export function registerTools(
     output: { schema: { ...objectSchema }, render: textResult },
     async execute(args) {
       if (settings.vault === '') throw new Error('vault is not configured')
-      return paperList(settings, stringArg(args, 'query'), children)
+      const listed = await listPapers(settings, children, { query: stringArg(args, 'query'), limit: PAPER_CAP })
+      if (!listed.ok) throw new Error(listed.failure.message)
+      return { papers: listed.rows, truncated: listed.truncated }
     },
   }))
   dispose.push(tools.register({
@@ -189,7 +170,7 @@ export function registerTools(
   }))
   dispose.push(tools.register({
     name: 'agentero_discover_arxiv',
-    description: 'Rank a short arXiv list for one keyword. Papers already in the vault are omitted. Import a chosen id with agentero_import_paper.',
+    description: 'Rank a short arXiv list for one keyword. Papers already in the vault are omitted. Each item has an identifier, title, authors, and score; import a chosen identifier with agentero_import_paper.',
     parameters: {
       type: 'object',
       additionalProperties: false,

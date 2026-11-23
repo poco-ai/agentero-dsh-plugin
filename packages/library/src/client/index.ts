@@ -217,7 +217,7 @@ export function apply(ctx: Context): void {
     async deletePaper(ref) {
       await post('/agentero/api/papers/delete', { ref })
     },
-    setRead(ref, read) { return setPaperRead(ref, read, request) },
+    setRead(ref, read, revision) { return setPaperRead(ref, read, revision, request) },
     async download(ref) {
       await post('/agentero/api/papers/download', { ref })
     },
