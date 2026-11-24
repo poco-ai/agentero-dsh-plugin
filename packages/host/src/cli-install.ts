@@ -253,19 +253,21 @@ function runCurl(args: readonly string[], label: string): Promise<Buffer> {
   })
 }
 
-async function downloadBuffer(url: string, timeoutMs: number): Promise<Buffer> {
-  if (await hasCurl()) {
-    const seconds = String(Math.max(1, Math.ceil(timeoutMs / 1000)))
-    try {
-      return await runCurl(
-        ['-fsSL', '--max-time', seconds, '--user-agent', USER_AGENT, url],
-        `download failed (${url})`,
-      )
-    } catch (error) {
-      if (errorText(error).includes('404')) throw releaseError(url)
-      throw error
-    }
-  }
+/** Injectable transports; tests replace these to exercise the fallback without network I/O. */
+export interface DownloadTransports {
+  curl?: (url: string, timeoutMs: number) => Promise<Buffer>
+  fetch?: (url: string, timeoutMs: number) => Promise<Buffer>
+}
+
+async function curlDownload(url: string, timeoutMs: number): Promise<Buffer> {
+  const seconds = String(Math.max(1, Math.ceil(timeoutMs / 1000)))
+  return await runCurl(
+    ['-fsSL', '--max-time', seconds, '--user-agent', USER_AGENT, url],
+    `download failed (${url})`,
+  )
+}
+
+async function fetchDownload(url: string, timeoutMs: number): Promise<Buffer> {
   let response: Response
   try {
     response = await fetch(url, {
@@ -278,6 +280,38 @@ async function downloadBuffer(url: string, timeoutMs: number): Promise<Buffer> {
   if (response.status === 404) throw releaseError(url)
   if (!response.ok) throw new Error(`download failed HTTP ${response.status}: ${url}`)
   return Buffer.from(await response.arrayBuffer())
+}
+
+/**
+ * Prefer curl, which honors system proxies, but fall back to Node's fetch on a
+ * transport error. On Windows, curl's SChannel backend can fail the TLS
+ * handshake (exit 35) while the same asset stays reachable through fetch.
+ * A 404 is a missing asset rather than a transport failure, so it is never retried.
+ */
+export async function downloadBuffer(
+  url: string,
+  timeoutMs: number,
+  transports: DownloadTransports = {},
+): Promise<Buffer> {
+  let curlError: unknown
+  if (transports.curl !== undefined || await hasCurl()) {
+    const viaCurl = transports.curl ?? curlDownload
+    try {
+      return await viaCurl(url, timeoutMs)
+    } catch (error) {
+      if (errorText(error).includes('404')) throw releaseError(url)
+      curlError = error
+    }
+  }
+  const viaFetch = transports.fetch ?? fetchDownload
+  try {
+    return await viaFetch(url, timeoutMs)
+  } catch (error) {
+    if (curlError !== undefined) {
+      throw new Error(`${errorText(error)} (curl also failed: ${errorText(curlError)})`)
+    }
+    throw error
+  }
 }
 
 /**
