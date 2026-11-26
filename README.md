@@ -58,6 +58,10 @@ agentero --help
 
 配置会直接保存到当前 dsh profile，不需要手动编辑 `cordis.patch.yml`。设置页选择的知识库目录会立即生效；CLI 路径留空则使用 PATH 里的 `agentero`。
 
+### 域名与反向代理访问
+
+Agentero API 复用 dsh 的登录认证和请求来源检查。通过自定义域名访问时，将对外提供服务的 `host[:port]` 加入 dsh 的 `trustedHosts`，让反向代理保留原始 `Host` 与 `Origin`，并在浏览器中完成 dsh 登录。未登录请求返回 401，未受信任的域名或跨站请求返回 403。
+
 ## 数据
 
 论文、PDF、笔记和标注都留在 Vault 里，和 [Agentero 桌面端](https://github.com/poco-ai/Agentero) 共用。插件只在本机运行，不另建数据库。
